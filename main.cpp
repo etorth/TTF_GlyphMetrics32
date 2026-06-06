@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <charconv>
 #include <iostream>
+#include <string>
 #include <string_view>
 #include <system_error>
 #include <vector>
@@ -13,25 +14,50 @@ struct SingleGlyphData {
     int left_padding;         // 预留的左边空白像素数量
     int right_padding;        // 预留的右边空白像素数量
     int baseline_y;           // 基线相对于返回的 Surface 最上一行的像素数量
+    int advance;              // glyph 排版推进宽度，空格等无像素字符也需要保留
+};
+
+struct RenderedGlyphData {
+    SDL_Surface* surface;
+    int baseline_y;
+    int left_padding;
+    int right_padding;
+    int advance;
 };
 
 struct ProgramOptions {
     const char* font_file = nullptr;
     int font_size = 0;
     std::string_view utf8_text;
-    bool show_box = false;
-    bool show_baseline = false;
-    bool show_single_texture = false;
+    bool draw_texture_box = false;
+    bool draw_bounding_box = false;
+    bool draw_baseline = false;
 };
+
+ProgramOptions g_options;
+std::vector<std::string_view> g_chars_to_draw;
+std::vector<SingleGlyphData> g_glyphs;
+std::vector<RenderedGlyphData> g_horizontal_cropped_surfaces;
+std::vector<RenderedGlyphData> g_glyph32_surfaces;
+std::vector<RenderedGlyphData> g_utf8_char_surfaces;
+
+TTF_Font* g_font = nullptr;
+SDL_Renderer* g_renderer = nullptr;
+SDL_Texture* g_single_text_texture = nullptr;
+SDL_Color g_text_color = { 255, 255, 255, 255 };
+
+int g_single_text_w = 0;
+int g_single_text_h = 0;
+int g_single_text_baseline_y = 0;
 
 void PrintUsage(std::ostream& os, const char* program) {
     os << "Usage: " << program
        << " --font-file <font-file>"
        << " --font-size <font-size-in-TTF_Open>"
        << " --utf8-text <utf8-string-to-render>"
-       << " [--show-box]"
-       << " [--show-baseline]"
-       << " [--show-single-texture]\n";
+       << " [--draw-texture-box]"
+       << " [--draw-bounding-box]"
+       << " [--draw-baseline]\n";
 }
 
 bool IsOptionWithValue(std::string_view arg, std::string_view option) {
@@ -106,19 +132,18 @@ bool ParseOptions(int argc, char* argv[], ProgramOptions& options, bool& help_re
             has_utf8_text = true;
             continue;
         }
-        if (arg == "--show-box") {
-            options.show_box = true;
+        if (arg == "--draw-texture-box") {
+            options.draw_texture_box = true;
             continue;
         }
-        if (arg == "--show-baseline") {
-            options.show_baseline = true;
+        if (arg == "--draw-bounding-box") {
+            options.draw_bounding_box = true;
             continue;
         }
-        if (arg == "--show-single-texture") {
-            options.show_single_texture = true;
+        if (arg == "--draw-baseline") {
+            options.draw_baseline = true;
             continue;
         }
-
         std::cerr << "Unknown option: " << arg << '\n';
         return false;
     }
@@ -214,7 +239,7 @@ bool SplitUTF8String(std::string_view text, std::vector<std::string_view>& chars
 
 // 获取单字排版数据与最小 Surface
 SingleGlyphData GetSingleGlyphMinBoundingBox(TTF_Font* font, std::string_view utf8_char, SDL_Color color) {
-    SingleGlyphData data = { nullptr, 0, 0, 0 };
+    SingleGlyphData data = { nullptr, 0, 0, 0, 0 };
     if (!font || utf8_char.empty()) return data;
 
     Uint32 ch = 0;
@@ -225,12 +250,13 @@ SingleGlyphData GetSingleGlyphMinBoundingBox(TTF_Font* font, std::string_view ut
 
     int minx, maxx, miny, maxy, advance;
     if (TTF_GlyphMetrics32(font, ch, &minx, &maxx, &miny, &maxy, &advance) != 0) {
-        return data; 
+        return data;
     }
 
     data.left_padding = minx;
     data.right_padding = advance - maxx;
     data.baseline_y = maxy;
+    data.advance = advance;
 
     const int glyph_w = maxx - minx;
     const int glyph_h = maxy - miny;
@@ -269,10 +295,257 @@ SingleGlyphData GetSingleGlyphMinBoundingBox(TTF_Font* font, std::string_view ut
     return data;
 }
 
+RenderedGlyphData RenderSingleGlyph(TTF_Font* font, std::string_view utf8_char, SDL_Color color, bool render_as_utf8) {
+    RenderedGlyphData data = { nullptr, font ? TTF_FontAscent(font) : 0, 0, 0, 0 };
+    if (!font || utf8_char.empty()) return data;
+
+    Uint32 ch = 0;
+    if (!DecodeSingleUTF8(utf8_char, ch)) {
+        std::cerr << "输入不是刚好一个合法 UTF-8 字符\n";
+        return data;
+    }
+
+    int minx, maxx, miny, maxy, advance;
+    if (TTF_GlyphMetrics32(font, ch, &minx, &maxx, &miny, &maxy, &advance) == 0) {
+        data.baseline_y = std::max(TTF_FontAscent(font), maxy);
+        data.left_padding = minx;
+        data.right_padding = advance - maxx;
+        data.advance = advance;
+        if (maxx - minx <= 0 || maxy - miny <= 0) {
+            return data;
+        }
+    }
+
+    if (render_as_utf8) {
+        const std::string utf8_string(utf8_char);
+        data.surface = TTF_RenderUTF8_Blended(font, utf8_string.c_str(), color);
+    } else {
+        data.surface = TTF_RenderGlyph32_Blended(font, ch, color);
+    }
+
+    if (!data.surface) {
+        std::cerr << (render_as_utf8 ? "TTF_RenderUTF8_Blended" : "TTF_RenderGlyph32_Blended")
+                  << " failed: " << TTF_GetError() << "\n";
+    }
+    return data;
+}
+
+RenderedGlyphData RenderHorizontallyCroppedGlyph(TTF_Font* font, std::string_view utf8_char, SDL_Color color) {
+    RenderedGlyphData data = { nullptr, font ? TTF_FontAscent(font) : 0, 0, 0, 0 };
+    if (!font || utf8_char.empty()) return data;
+
+    Uint32 ch = 0;
+    if (!DecodeSingleUTF8(utf8_char, ch)) {
+        std::cerr << "输入不是刚好一个合法 UTF-8 字符\n";
+        return data;
+    }
+
+    int minx, maxx, miny, maxy, advance;
+    if (TTF_GlyphMetrics32(font, ch, &minx, &maxx, &miny, &maxy, &advance) != 0) {
+        return data;
+    }
+
+    data.left_padding = minx;
+    data.right_padding = advance - maxx;
+    data.baseline_y = std::max(TTF_FontAscent(font), maxy);
+    data.advance = advance;
+
+    const int glyph_w = maxx - minx;
+    if (glyph_w <= 0) {
+        return data;
+    }
+
+    SDL_Surface* rendered = TTF_RenderGlyph32_Blended(font, ch, color);
+    if (!rendered) {
+        std::cerr << "TTF_RenderGlyph32_Blended failed: " << TTF_GetError() << "\n";
+        return data;
+    }
+
+    data.surface = SDL_CreateRGBSurfaceWithFormat(0, glyph_w, rendered->h, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!data.surface) {
+        SDL_FreeSurface(rendered);
+        return data;
+    }
+
+    SDL_FillRect(data.surface, nullptr, SDL_MapRGBA(data.surface->format, 0, 0, 0, 0));
+    SDL_SetSurfaceBlendMode(rendered, SDL_BLENDMODE_NONE);
+
+    SDL_Rect src {
+        std::max(0, minx),
+        0,
+        glyph_w,
+        rendered->h
+    };
+    if (SDL_BlitSurface(rendered, &src, data.surface, nullptr) != 0) {
+        SDL_FreeSurface(data.surface);
+        data.surface = nullptr;
+    }
+
+    SDL_FreeSurface(rendered);
+    return data;
+}
+
+void DrawTextureBox(const SDL_Rect& rect) {
+    if (!g_options.draw_texture_box) {
+        return;
+    }
+
+    SDL_SetRenderDrawColor(g_renderer, 60, 255, 60, 100);
+    SDL_RenderDrawRect(g_renderer, &rect);
+}
+
+void DrawBoundingBox(const SDL_Rect& texture_dest, int left_padding, int right_padding) {
+    if (!g_options.draw_bounding_box) {
+        return;
+    }
+
+    SDL_Rect rect {
+        texture_dest.x - left_padding,
+        texture_dest.y,
+        left_padding + texture_dest.w + right_padding,
+        texture_dest.h
+    };
+    if (rect.w <= 0 || rect.h <= 0) {
+        return;
+    }
+
+    SDL_SetRenderDrawColor(g_renderer, 255, 210, 60, 160);
+    SDL_RenderDrawRect(g_renderer, &rect);
+}
+
+void DrawEmptyBoundingBox(int start_x, int baseline_y, int advance) {
+    if (!g_options.draw_bounding_box || advance <= 0) {
+        return;
+    }
+
+    SDL_Rect rect {
+        start_x,
+        baseline_y - TTF_FontAscent(g_font),
+        advance,
+        TTF_FontAscent(g_font) - TTF_FontDescent(g_font)
+    };
+    if (rect.h <= 0) {
+        return;
+    }
+
+    SDL_SetRenderDrawColor(g_renderer, 255, 210, 60, 160);
+    SDL_RenderDrawRect(g_renderer, &rect);
+}
+
+void DrawTexture(SDL_Texture* texture, const SDL_Rect& dest, int left_padding = 0, int right_padding = 0) {
+    DrawBoundingBox(dest, left_padding, right_padding);
+    DrawTextureBox(dest);
+    SDL_RenderCopy(g_renderer, texture, nullptr, &dest);
+}
+
+void DrawSurface(SDL_Surface* surface, const SDL_Rect& dest, int left_padding = 0, int right_padding = 0) {
+    SDL_Texture* texture = SDL_CreateTextureFromSurface(g_renderer, surface);
+    if (!texture) {
+        std::cerr << "SDL_CreateTextureFromSurface failed: " << SDL_GetError() << "\n";
+        return;
+    }
+
+    DrawTexture(texture, dest, left_padding, right_padding);
+    SDL_DestroyTexture(texture);
+}
+
+void DrawCroppedGlyphRow(int start_x, int baseline_y) {
+    int cursor_x = start_x;
+    for (const auto& glyph : g_glyphs) {
+        const int texture_w = glyph.min_surface ? glyph.min_surface->w : 0;
+        if (glyph.min_surface) {
+            SDL_Rect dest {
+                cursor_x + glyph.left_padding,
+                baseline_y - glyph.baseline_y,
+                texture_w,
+                glyph.min_surface->h
+            };
+            DrawSurface(glyph.min_surface, dest, glyph.left_padding, glyph.right_padding);
+        } else {
+            DrawEmptyBoundingBox(cursor_x, baseline_y, glyph.advance);
+        }
+
+        cursor_x += glyph.advance;
+    }
+}
+
+void DrawSingleTextTextureRow(int start_x, int baseline_y) {
+    if (!g_single_text_texture) {
+        return;
+    }
+
+    SDL_Rect dest {
+        start_x,
+        baseline_y - g_single_text_baseline_y,
+        g_single_text_w,
+        g_single_text_h
+    };
+    DrawTexture(g_single_text_texture, dest);
+}
+
+void DrawHorizontallyCroppedGlyphRow(int start_x, int baseline_y) {
+    int cursor_x = start_x;
+    for (const auto& glyph : g_horizontal_cropped_surfaces) {
+        const int texture_w = glyph.surface ? glyph.surface->w : 0;
+        if (glyph.surface) {
+            SDL_Rect dest {
+                cursor_x + glyph.left_padding,
+                baseline_y - glyph.baseline_y,
+                texture_w,
+                glyph.surface->h
+            };
+            DrawSurface(glyph.surface, dest, glyph.left_padding, glyph.right_padding);
+        } else {
+            DrawEmptyBoundingBox(cursor_x, baseline_y, glyph.advance);
+        }
+
+        cursor_x += glyph.advance;
+    }
+}
+
+void DrawGlyph32BlendedRow(int start_x, int baseline_y) {
+    int cursor_x = start_x;
+    for (const auto& glyph : g_glyph32_surfaces) {
+        if (!glyph.surface) {
+            DrawEmptyBoundingBox(cursor_x, baseline_y, glyph.advance);
+            cursor_x += glyph.advance;
+            continue;
+        }
+
+        SDL_Rect dest {
+            cursor_x,
+            baseline_y - glyph.baseline_y,
+            glyph.surface->w,
+            glyph.surface->h
+        };
+        DrawSurface(glyph.surface, dest, glyph.left_padding, glyph.right_padding);
+        cursor_x += glyph.surface->w;
+    }
+}
+
+void DrawUtf8CharBlendedRow(int start_x, int baseline_y) {
+    int cursor_x = start_x;
+    for (const auto& glyph : g_utf8_char_surfaces) {
+        if (!glyph.surface) {
+            DrawEmptyBoundingBox(cursor_x, baseline_y, glyph.advance);
+            cursor_x += glyph.advance;
+            continue;
+        }
+
+        SDL_Rect dest {
+            cursor_x,
+            baseline_y - glyph.baseline_y,
+            glyph.surface->w,
+            glyph.surface->h
+        };
+        DrawSurface(glyph.surface, dest, glyph.left_padding, glyph.right_padding);
+        cursor_x += glyph.surface->w;
+    }
+}
+
 int main(int argc, char* argv[]) {
-    ProgramOptions options;
     bool help_requested = false;
-    if (!ParseOptions(argc, argv, options, help_requested)) {
+    if (!ParseOptions(argc, argv, g_options, help_requested)) {
         PrintUsage(std::cerr, argv[0]);
         return 1;
     }
@@ -281,8 +554,7 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    std::vector<std::string_view> chars_to_draw;
-    if (!SplitUTF8String(options.utf8_text, chars_to_draw)) {
+    if (!SplitUTF8String(g_options.utf8_text, g_chars_to_draw)) {
         std::cerr << "--utf8-text must be a non-empty valid UTF-8 string\n";
         return 1;
     }
@@ -299,65 +571,66 @@ int main(int argc, char* argv[]) {
     }
 
     // 创建窗口和渲染器
-    SDL_Window* window = SDL_CreateWindow("SDL2_ttf Metrics Demo", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 800, 400, SDL_WINDOW_SHOWN);
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    SDL_Window* window = SDL_CreateWindow("SDL2_ttf Metrics Demo", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 800, 600, SDL_WINDOW_SHOWN);
+    g_renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
 
-    TTF_Font* font = TTF_OpenFont(options.font_file, options.font_size);
-    if (!font) {
-        std::cerr << "字体加载失败: " << options.font_file << ". Error: " << TTF_GetError() << "\n";
-        SDL_DestroyRenderer(renderer);
+    g_font = TTF_OpenFont(g_options.font_file, g_options.font_size);
+    if (!g_font) {
+        std::cerr << "字体加载失败: " << g_options.font_file << ". Error: " << TTF_GetError() << "\n";
+        SDL_DestroyRenderer(g_renderer);
         SDL_DestroyWindow(window);
         TTF_Quit();
         SDL_Quit();
         return -1;
     }
 
-    SDL_Color textColor = { 255, 255, 255, 255 }; // 白色
-    SDL_Texture* single_text_texture = nullptr;
-    int single_text_w = 0;
-    int single_text_h = 0;
-
     // TTF_RenderUTF8_Blended() 渲染整行时，真实基线位置是 font ascent 加上内部 ystart。
     // 像素字体经过 hinting 后，某些 glyph 的 maxy 可能比 TTF_FontAscent() 多 1px；
     // SDL_ttf 会用 ystart 把整行下移，避免裁掉这顶部 1px。第一行逐字绘制时按
     // 每个 glyph 的 maxy 对齐，所以第二行整段 texture 也要使用相同的有效基线。
-    int single_text_baseline_y = TTF_FontAscent(font);
+    g_single_text_baseline_y = TTF_FontAscent(g_font);
 
-    if (options.show_single_texture) {
-        SDL_Surface* single_text_surface = TTF_RenderUTF8_Blended(font, options.utf8_text.data(), textColor);
-        if (!single_text_surface) {
-            std::cerr << "TTF_RenderUTF8_Blended failed: " << TTF_GetError() << "\n";
-            TTF_CloseFont(font);
-            SDL_DestroyRenderer(renderer);
-            SDL_DestroyWindow(window);
-            TTF_Quit();
-            SDL_Quit();
-            return -1;
-        }
+    SDL_Surface* single_text_surface = TTF_RenderUTF8_Blended(g_font, g_options.utf8_text.data(), g_text_color);
+    if (!single_text_surface) {
+        std::cerr << "TTF_RenderUTF8_Blended failed: " << TTF_GetError() << "\n";
+        TTF_CloseFont(g_font);
+        SDL_DestroyRenderer(g_renderer);
+        SDL_DestroyWindow(window);
+        TTF_Quit();
+        SDL_Quit();
+        return -1;
+    }
 
-        single_text_w = single_text_surface->w;
-        single_text_h = single_text_surface->h;
-        single_text_texture = SDL_CreateTextureFromSurface(renderer, single_text_surface);
-        SDL_FreeSurface(single_text_surface);
-        if (!single_text_texture) {
-            std::cerr << "SDL_CreateTextureFromSurface failed: " << SDL_GetError() << "\n";
-            TTF_CloseFont(font);
-            SDL_DestroyRenderer(renderer);
-            SDL_DestroyWindow(window);
-            TTF_Quit();
-            SDL_Quit();
-            return -1;
-        }
+    g_single_text_w = single_text_surface->w;
+    g_single_text_h = single_text_surface->h;
+    g_single_text_texture = SDL_CreateTextureFromSurface(g_renderer, single_text_surface);
+    SDL_FreeSurface(single_text_surface);
+    if (!g_single_text_texture) {
+        std::cerr << "SDL_CreateTextureFromSurface failed: " << SDL_GetError() << "\n";
+        TTF_CloseFont(g_font);
+        SDL_DestroyRenderer(g_renderer);
+        SDL_DestroyWindow(window);
+        TTF_Quit();
+        SDL_Quit();
+        return -1;
     }
 
     // 提取并缓存所有字符的解耦数据
-    std::vector<SingleGlyphData> glyphs;
+    g_horizontal_cropped_surfaces.reserve(g_chars_to_draw.size());
+    g_glyph32_surfaces.reserve(g_chars_to_draw.size());
+    g_utf8_char_surfaces.reserve(g_chars_to_draw.size());
+
     std::cout << "char\ttexture_width_px\ttexture_height_px\tleft_padding_px\tright_padding_px\tbaseline_from_top_px\n";
-    for (auto sv : chars_to_draw) {
-        glyphs.push_back(GetSingleGlyphMinBoundingBox(font, sv, textColor));
+    for (auto sv : g_chars_to_draw) {
+        g_glyphs.push_back(GetSingleGlyphMinBoundingBox(g_font, sv, g_text_color));
         std::cout.write(sv.data(), static_cast<std::streamsize>(sv.size()));
-        const auto& glyph = glyphs.back();
-        single_text_baseline_y = std::max(single_text_baseline_y, glyph.baseline_y);
+        const auto& glyph = g_glyphs.back();
+        g_single_text_baseline_y = std::max(g_single_text_baseline_y, glyph.baseline_y);
+
+        g_horizontal_cropped_surfaces.push_back(RenderHorizontallyCroppedGlyph(g_font, sv, g_text_color));
+        g_glyph32_surfaces.push_back(RenderSingleGlyph(g_font, sv, g_text_color, false));
+        g_utf8_char_surfaces.push_back(RenderSingleGlyph(g_font, sv, g_text_color, true));
+
         std::cout << '\t' << (glyph.min_surface ? glyph.min_surface->w : 0)
                   << '\t' << (glyph.min_surface ? glyph.min_surface->h : 0)
                   << '\t' << glyph.left_padding
@@ -373,85 +646,54 @@ int main(int argc, char* argv[]) {
             if (e.type == SDL_QUIT) quit = true;
         }
 
-        // 清屏（深蓝色背景）
-        SDL_SetRenderDrawColor(renderer, 20, 30, 45, 255);
-        SDL_RenderClear(renderer);
+        SDL_SetRenderDrawColor(g_renderer, 20, 30, 45, 255);
+        SDL_RenderClear(g_renderer);
 
-        // --- 核心绘制逻辑开始 ---
-        const int row_x = 100; // 虚拟光标起始 X
-        const int first_row_baseline_y = options.show_single_texture ? 120 : 200;
-        const int second_row_baseline_y = first_row_baseline_y + std::max(TTF_FontLineSkip(font), options.font_size) + 40;
+        const int row_x = 100;
+        const int row_gap = std::max(TTF_FontLineSkip(g_font), g_options.font_size) + 40;
+        const int first_row_baseline_y = 80;
+        const int second_row_baseline_y = first_row_baseline_y + row_gap;
+        const int third_row_baseline_y = second_row_baseline_y + row_gap;
+        const int fourth_row_baseline_y = third_row_baseline_y + row_gap;
+        const int fifth_row_baseline_y = fourth_row_baseline_y + row_gap;
 
-        if (options.show_baseline) {
-            // 辅助线：绘制一条红色的水平基线，用以肉眼验证文字是否完美对齐
+        if (g_options.draw_baseline) {
             int output_w = 0;
             int output_h = 0;
-            SDL_GetRendererOutputSize(renderer, &output_w, &output_h);
-            SDL_SetRenderDrawColor(renderer, 255, 60, 60, 255);
-            SDL_RenderDrawLine(renderer, 0, first_row_baseline_y, output_w - 1, first_row_baseline_y);
-            if (options.show_single_texture) {
-                SDL_RenderDrawLine(renderer, 0, second_row_baseline_y, output_w - 1, second_row_baseline_y);
-            }
+            SDL_GetRendererOutputSize(g_renderer, &output_w, &output_h);
+            SDL_SetRenderDrawColor(g_renderer, 255, 60, 60, 255);
+            SDL_RenderDrawLine(g_renderer, 0, first_row_baseline_y, output_w - 1, first_row_baseline_y);
+            SDL_RenderDrawLine(g_renderer, 0, second_row_baseline_y, output_w - 1, second_row_baseline_y);
+            SDL_RenderDrawLine(g_renderer, 0, third_row_baseline_y, output_w - 1, third_row_baseline_y);
+            SDL_RenderDrawLine(g_renderer, 0, fourth_row_baseline_y, output_w - 1, fourth_row_baseline_y);
+            SDL_RenderDrawLine(g_renderer, 0, fifth_row_baseline_y, output_w - 1, fifth_row_baseline_y);
         }
 
-        int cursor_x = row_x;
-        for (const auto& glyph : glyphs) {
-            if (glyph.min_surface) {
-                SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer, glyph.min_surface);
+        DrawCroppedGlyphRow(row_x, first_row_baseline_y);
+        DrawHorizontallyCroppedGlyphRow(row_x, second_row_baseline_y);
+        DrawSingleTextTextureRow(row_x, third_row_baseline_y);
+        DrawGlyph32BlendedRow(row_x, fourth_row_baseline_y);
+        DrawUtf8CharBlendedRow(row_x, fifth_row_baseline_y);
 
-                SDL_Rect dest;
-                // 1. 考虑左留白，定位 X 轴
-                dest.x = cursor_x + glyph.left_padding;
-                // 2. 利用相对基线坐标，完美对齐 Y 轴
-                dest.y = first_row_baseline_y - glyph.baseline_y;
-                dest.w = glyph.min_surface->w;
-                dest.h = glyph.min_surface->h;
-
-                if (options.show_box) {
-                    // 辅助线：绘制每个字符实际 Surface 的绿色外包围盒边框，观察其紧凑程度
-                    SDL_SetRenderDrawColor(renderer, 60, 255, 60, 100);
-                    SDL_RenderDrawRect(renderer, &dest);
-                }
-
-                // 绘制字符最小包围盒
-                SDL_RenderCopy(renderer, tex, nullptr, &dest);
-
-                // 3. 绘制完毕后，光标推进当前字符的排版全宽，也就是 advance
-                cursor_x += (glyph.left_padding + glyph.min_surface->w + glyph.right_padding);
-
-                SDL_DestroyTexture(tex);
-            } else {
-                // 如果是空格等无像素内容，依然需要向前推进 advance 距离
-                // 这里本例均是可见字符，故略过
-            }
-        }
-
-        if (single_text_texture) {
-            SDL_Rect dest {
-                row_x,
-                second_row_baseline_y - single_text_baseline_y,
-                single_text_w,
-                single_text_h
-            };
-
-            if (options.show_box) {
-                SDL_SetRenderDrawColor(renderer, 60, 255, 60, 100);
-                SDL_RenderDrawRect(renderer, &dest);
-            }
-            SDL_RenderCopy(renderer, single_text_texture, nullptr, &dest);
-        }
-        // --- 核心绘制逻辑结束 ---
-
-        SDL_RenderPresent(renderer);
+        SDL_RenderPresent(g_renderer);
     }
 
     // 清理资源
-    for (auto& glyph : glyphs) {
+    for (auto& glyph : g_glyphs) {
         if (glyph.min_surface) SDL_FreeSurface(glyph.min_surface);
     }
-    if (single_text_texture) SDL_DestroyTexture(single_text_texture);
-    TTF_CloseFont(font);
-    SDL_DestroyRenderer(renderer);
+    for (auto& glyph : g_horizontal_cropped_surfaces) {
+        if (glyph.surface) SDL_FreeSurface(glyph.surface);
+    }
+    for (auto& glyph : g_glyph32_surfaces) {
+        if (glyph.surface) SDL_FreeSurface(glyph.surface);
+    }
+    for (auto& glyph : g_utf8_char_surfaces) {
+        if (glyph.surface) SDL_FreeSurface(glyph.surface);
+    }
+    if (g_single_text_texture) SDL_DestroyTexture(g_single_text_texture);
+    TTF_CloseFont(g_font);
+    SDL_DestroyRenderer(g_renderer);
     SDL_DestroyWindow(window);
     TTF_Quit();
     SDL_Quit();
