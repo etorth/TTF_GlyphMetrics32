@@ -316,6 +316,7 @@ int main(int argc, char* argv[]) {
     SDL_Texture* single_text_texture = nullptr;
     int single_text_w = 0;
     int single_text_h = 0;
+    int single_text_baseline_y = TTF_FontAscent(font);
 
     if (options.show_single_texture) {
         SDL_Surface* single_text_surface = TTF_RenderUTF8_Blended(font, options.utf8_text.data(), textColor);
@@ -351,6 +352,7 @@ int main(int argc, char* argv[]) {
         glyphs.push_back(GetSingleGlyphMinBoundingBox(font, sv, textColor));
         std::cout.write(sv.data(), static_cast<std::streamsize>(sv.size()));
         const auto& glyph = glyphs.back();
+        single_text_baseline_y = std::max(single_text_baseline_y, glyph.baseline_y);
         std::cout << '\t' << (glyph.min_surface ? glyph.min_surface->w : 0)
                   << '\t' << (glyph.min_surface ? glyph.min_surface->h : 0)
                   << '\t' << glyph.left_padding
@@ -422,7 +424,7 @@ int main(int argc, char* argv[]) {
         if (single_text_texture) {
             SDL_Rect dest {
                 row_x,
-                second_row_baseline_y - TTF_FontAscent(font),
+                second_row_baseline_y - single_text_baseline_y,
                 single_text_w,
                 single_text_h
             };
