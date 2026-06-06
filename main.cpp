@@ -316,6 +316,11 @@ int main(int argc, char* argv[]) {
     SDL_Texture* single_text_texture = nullptr;
     int single_text_w = 0;
     int single_text_h = 0;
+
+    // TTF_RenderUTF8_Blended() 渲染整行时，真实基线位置是 font ascent 加上内部 ystart。
+    // 像素字体经过 hinting 后，某些 glyph 的 maxy 可能比 TTF_FontAscent() 多 1px；
+    // SDL_ttf 会用 ystart 把整行下移，避免裁掉这顶部 1px。第一行逐字绘制时按
+    // 每个 glyph 的 maxy 对齐，所以第二行整段 texture 也要使用相同的有效基线。
     int single_text_baseline_y = TTF_FontAscent(font);
 
     if (options.show_single_texture) {
