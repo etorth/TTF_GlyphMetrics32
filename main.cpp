@@ -15,6 +15,132 @@ struct SingleGlyphData {
     int baseline_y;           // 基线相对于返回的 Surface 最上一行的像素数量
 };
 
+struct ProgramOptions {
+    const char* font_file = nullptr;
+    int font_size = 0;
+    std::string_view utf8_text;
+    bool show_box = false;
+    bool show_baseline = false;
+    bool show_single_texture = false;
+};
+
+void PrintUsage(std::ostream& os, const char* program) {
+    os << "Usage: " << program
+       << " --font-file <font-file>"
+       << " --font-size <font-size-in-TTF_Open>"
+       << " --utf8-text <utf8-string-to-render>"
+       << " [--show-box]"
+       << " [--show-baseline]"
+       << " [--show-single-texture]\n";
+}
+
+bool IsOptionWithValue(std::string_view arg, std::string_view option) {
+    return arg == option ||
+           (arg.size() > option.size() && arg.compare(0, option.size(), option) == 0 &&
+            arg[option.size()] == '=');
+}
+
+bool ReadOptionValue(int argc, char* argv[], int& index, std::string_view option, std::string_view& value) {
+    const std::string_view arg = argv[index];
+    if (arg == option) {
+        if (index + 1 >= argc) {
+            std::cerr << option << " requires a value\n";
+            return false;
+        }
+        value = argv[++index];
+        return true;
+    }
+
+    value = arg.substr(option.size() + 1);
+    return true;
+}
+
+bool ParsePositiveInt(std::string_view value, int& output) {
+    output = 0;
+    const auto parse_result = std::from_chars(value.data(), value.data() + value.size(), output);
+    return parse_result.ec == std::errc{} && parse_result.ptr == value.data() + value.size() && output > 0;
+}
+
+bool ParseOptions(int argc, char* argv[], ProgramOptions& options, bool& help_requested) {
+    help_requested = false;
+    bool has_font_file = false;
+    bool has_font_size = false;
+    bool has_utf8_text = false;
+
+    for (int i = 1; i < argc; ++i) {
+        const std::string_view arg = argv[i];
+        std::string_view value;
+
+        if (arg == "--help" || arg == "-h") {
+            help_requested = true;
+            return true;
+        }
+        if (IsOptionWithValue(arg, "--font-file")) {
+            if (!ReadOptionValue(argc, argv, i, "--font-file", value)) {
+                return false;
+            }
+            if (value.empty()) {
+                std::cerr << "--font-file requires a non-empty value\n";
+                return false;
+            }
+            options.font_file = value.data();
+            has_font_file = true;
+            continue;
+        }
+        if (IsOptionWithValue(arg, "--font-size")) {
+            if (!ReadOptionValue(argc, argv, i, "--font-size", value)) {
+                return false;
+            }
+            if (!ParsePositiveInt(value, options.font_size)) {
+                std::cerr << "--font-size must be a positive integer\n";
+                return false;
+            }
+            has_font_size = true;
+            continue;
+        }
+        if (IsOptionWithValue(arg, "--utf8-text")) {
+            if (!ReadOptionValue(argc, argv, i, "--utf8-text", value)) {
+                return false;
+            }
+            options.utf8_text = value;
+            has_utf8_text = true;
+            continue;
+        }
+        if (arg == "--show-box") {
+            options.show_box = true;
+            continue;
+        }
+        if (arg == "--show-baseline") {
+            options.show_baseline = true;
+            continue;
+        }
+        if (arg == "--show-single-texture") {
+            options.show_single_texture = true;
+            continue;
+        }
+
+        std::cerr << "Unknown option: " << arg << '\n';
+        return false;
+    }
+
+    if (!has_font_file || !has_font_size || !has_utf8_text) {
+        std::cerr << "Missing required option:";
+        if (!has_font_file) {
+            std::cerr << " --font-file";
+        }
+        if (!has_font_size) {
+            std::cerr << " --font-size";
+        }
+        if (!has_utf8_text) {
+            std::cerr << " --utf8-text";
+        }
+        std::cerr << '\n';
+        return false;
+    }
+
+    return true;
+}
+
 bool DecodeSingleUTF8(std::string_view sv, Uint32& out) {
     out = 0;
     const auto byte = [&](std::size_t i) {
@@ -144,27 +270,20 @@ SingleGlyphData GetSingleGlyphMinBoundingBox(TTF_Font* font, std::string_view ut
 }
 
 int main(int argc, char* argv[]) {
-    if (argc != 4) {
-        std::cerr << "Usage: " << argv[0] << " <font-file> <font-size-in-TTF_Open> <utf8-string-to-render>\n";
+    ProgramOptions options;
+    bool help_requested = false;
+    if (!ParseOptions(argc, argv, options, help_requested)) {
+        PrintUsage(std::cerr, argv[0]);
         return 1;
     }
-
-    const char* font_file = argv[1];
-    std::string_view text_to_render = argv[3];
-    int font_size = 0;
-    std::string_view font_size_arg = argv[2];
-    const auto parse_result = std::from_chars(
-        font_size_arg.data(), font_size_arg.data() + font_size_arg.size(), font_size);
-    if (parse_result.ec != std::errc{} ||
-        parse_result.ptr != font_size_arg.data() + font_size_arg.size() ||
-        font_size <= 0) {
-        std::cerr << "font-size-in-TTF_Open must be a positive integer\n";
-        return 1;
+    if (help_requested) {
+        PrintUsage(std::cout, argv[0]);
+        return 0;
     }
 
     std::vector<std::string_view> chars_to_draw;
-    if (!SplitUTF8String(text_to_render, chars_to_draw)) {
-        std::cerr << "utf8-string-to-render must be a non-empty valid UTF-8 string\n";
+    if (!SplitUTF8String(options.utf8_text, chars_to_draw)) {
+        std::cerr << "--utf8-text must be a non-empty valid UTF-8 string\n";
         return 1;
     }
 
@@ -183,9 +302,9 @@ int main(int argc, char* argv[]) {
     SDL_Window* window = SDL_CreateWindow("SDL2_ttf Metrics Demo", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 800, 400, SDL_WINDOW_SHOWN);
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
 
-    TTF_Font* font = TTF_OpenFont(font_file, font_size);
+    TTF_Font* font = TTF_OpenFont(options.font_file, options.font_size);
     if (!font) {
-        std::cerr << "字体加载失败: " << font_file << ". Error: " << TTF_GetError() << "\n";
+        std::cerr << "字体加载失败: " << options.font_file << ". Error: " << TTF_GetError() << "\n";
         SDL_DestroyRenderer(renderer);
         SDL_DestroyWindow(window);
         TTF_Quit();
@@ -194,6 +313,36 @@ int main(int argc, char* argv[]) {
     }
 
     SDL_Color textColor = { 255, 255, 255, 255 }; // 白色
+    SDL_Texture* single_text_texture = nullptr;
+    int single_text_w = 0;
+    int single_text_h = 0;
+
+    if (options.show_single_texture) {
+        SDL_Surface* single_text_surface = TTF_RenderUTF8_Blended(font, options.utf8_text.data(), textColor);
+        if (!single_text_surface) {
+            std::cerr << "TTF_RenderUTF8_Blended failed: " << TTF_GetError() << "\n";
+            TTF_CloseFont(font);
+            SDL_DestroyRenderer(renderer);
+            SDL_DestroyWindow(window);
+            TTF_Quit();
+            SDL_Quit();
+            return -1;
+        }
+
+        single_text_w = single_text_surface->w;
+        single_text_h = single_text_surface->h;
+        single_text_texture = SDL_CreateTextureFromSurface(renderer, single_text_surface);
+        SDL_FreeSurface(single_text_surface);
+        if (!single_text_texture) {
+            std::cerr << "SDL_CreateTextureFromSurface failed: " << SDL_GetError() << "\n";
+            TTF_CloseFont(font);
+            SDL_DestroyRenderer(renderer);
+            SDL_DestroyWindow(window);
+            TTF_Quit();
+            SDL_Quit();
+            return -1;
+        }
+    }
 
     // 提取并缓存所有字符的解耦数据
     std::vector<SingleGlyphData> glyphs;
@@ -222,16 +371,23 @@ int main(int argc, char* argv[]) {
         SDL_RenderClear(renderer);
 
         // --- 核心绘制逻辑开始 ---
-        int cursor_x = 100; // 虚拟光标起始 X
-        int cursor_y = 200; // 虚拟光标的基线（Baseline）高度定在 Y = 200 像素处
+        const int row_x = 100; // 虚拟光标起始 X
+        const int first_row_baseline_y = options.show_single_texture ? 120 : 200;
+        const int second_row_baseline_y = first_row_baseline_y + std::max(TTF_FontLineSkip(font), options.font_size) + 40;
 
-        // 辅助线：绘制一条红色的水平基线，用以肉眼验证文字是否完美对齐
-        int output_w = 0;
-        int output_h = 0;
-        SDL_GetRendererOutputSize(renderer, &output_w, &output_h);
-        SDL_SetRenderDrawColor(renderer, 255, 60, 60, 255);
-        SDL_RenderDrawLine(renderer, 0, cursor_y, output_w - 1, cursor_y);
+        if (options.show_baseline) {
+            // 辅助线：绘制一条红色的水平基线，用以肉眼验证文字是否完美对齐
+            int output_w = 0;
+            int output_h = 0;
+            SDL_GetRendererOutputSize(renderer, &output_w, &output_h);
+            SDL_SetRenderDrawColor(renderer, 255, 60, 60, 255);
+            SDL_RenderDrawLine(renderer, 0, first_row_baseline_y, output_w - 1, first_row_baseline_y);
+            if (options.show_single_texture) {
+                SDL_RenderDrawLine(renderer, 0, second_row_baseline_y, output_w - 1, second_row_baseline_y);
+            }
+        }
 
+        int cursor_x = row_x;
         for (const auto& glyph : glyphs) {
             if (glyph.min_surface) {
                 SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer, glyph.min_surface);
@@ -240,16 +396,18 @@ int main(int argc, char* argv[]) {
                 // 1. 考虑左留白，定位 X 轴
                 dest.x = cursor_x + glyph.left_padding;
                 // 2. 利用相对基线坐标，完美对齐 Y 轴
-                dest.y = cursor_y - glyph.baseline_y;
+                dest.y = first_row_baseline_y - glyph.baseline_y;
                 dest.w = glyph.min_surface->w;
                 dest.h = glyph.min_surface->h;
 
+                if (options.show_box) {
+                    // 辅助线：绘制每个字符实际 Surface 的绿色外包围盒边框，观察其紧凑程度
+                    SDL_SetRenderDrawColor(renderer, 60, 255, 60, 100);
+                    SDL_RenderDrawRect(renderer, &dest);
+                }
+
                 // 绘制字符最小包围盒
                 SDL_RenderCopy(renderer, tex, nullptr, &dest);
-
-                // 辅助线：绘制每个字符实际 Surface 的绿色外包围盒边框，观察其紧凑程度
-                SDL_SetRenderDrawColor(renderer, 60, 255, 60, 100);
-                SDL_RenderDrawRect(renderer, &dest);
 
                 // 3. 绘制完毕后，光标推进当前字符的排版全宽，也就是 advance
                 cursor_x += (glyph.left_padding + glyph.min_surface->w + glyph.right_padding);
@@ -260,6 +418,21 @@ int main(int argc, char* argv[]) {
                 // 这里本例均是可见字符，故略过
             }
         }
+
+        if (single_text_texture) {
+            SDL_Rect dest {
+                row_x,
+                second_row_baseline_y - TTF_FontAscent(font),
+                single_text_w,
+                single_text_h
+            };
+
+            if (options.show_box) {
+                SDL_SetRenderDrawColor(renderer, 60, 255, 60, 100);
+                SDL_RenderDrawRect(renderer, &dest);
+            }
+            SDL_RenderCopy(renderer, single_text_texture, nullptr, &dest);
+        }
         // --- 核心绘制逻辑结束 ---
 
         SDL_RenderPresent(renderer);
@@ -269,6 +442,7 @@ int main(int argc, char* argv[]) {
     for (auto& glyph : glyphs) {
         if (glyph.min_surface) SDL_FreeSurface(glyph.min_surface);
     }
+    if (single_text_texture) SDL_DestroyTexture(single_text_texture);
     TTF_CloseFont(font);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
