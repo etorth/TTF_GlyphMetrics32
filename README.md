@@ -4,7 +4,7 @@ sample code to extract bounding box of a UTF8 character
 Usage:
 
 ```sh
-./a.out --font-file ./1.ttf --font-size 32 --utf8-text "Google" --draw-texture-box --draw-bounding-box --draw-baseline
+./a.out --font-file ./1.ttf --font-size 32 --utf8-text "Google" --draw-texture-box --draw-bounding-box --draw-baseline --font-style-bold --font-style-italic --disable-kerning
 ```
 
 The window shows five rows:

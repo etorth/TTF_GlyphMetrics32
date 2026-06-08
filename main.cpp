@@ -41,6 +41,9 @@ struct ProgramOptions {
     bool draw_texture_box = false;
     bool draw_bounding_box = false;
     bool draw_baseline = false;
+    bool font_style_bold = false;
+    bool font_style_italic = false;
+    bool disable_kerning = false;
 };
 
 ProgramOptions g_options;
@@ -66,7 +69,10 @@ void PrintUsage(std::ostream& os, const char* program) {
        << " --utf8-text <utf8-string-to-render>"
        << " [--draw-texture-box]"
        << " [--draw-bounding-box]"
-       << " [--draw-baseline]\n";
+       << " [--draw-baseline]"
+       << " [--font-style-bold]"
+       << " [--font-style-italic]"
+       << " [--disable-kerning]\n";
 }
 
 bool IsOptionWithValue(std::string_view arg, std::string_view option) {
@@ -151,6 +157,18 @@ bool ParseOptions(int argc, char* argv[], ProgramOptions& options, bool& help_re
         }
         if (arg == "--draw-baseline") {
             options.draw_baseline = true;
+            continue;
+        }
+        if (arg == "--font-style-bold") {
+            options.font_style_bold = true;
+            continue;
+        }
+        if (arg == "--font-style-italic") {
+            options.font_style_italic = true;
+            continue;
+        }
+        if (arg == "--disable-kerning") {
+            options.disable_kerning = true;
             continue;
         }
         std::cerr << "Unknown option: " << arg << '\n';
@@ -618,6 +636,15 @@ int main(int argc, char* argv[]) {
         SDL_Quit();
         return -1;
     }
+    int font_style = TTF_STYLE_NORMAL;
+    if (g_options.font_style_bold) {
+        font_style |= TTF_STYLE_BOLD;
+    }
+    if (g_options.font_style_italic) {
+        font_style |= TTF_STYLE_ITALIC;
+    }
+    TTF_SetFontStyle(g_font, font_style);
+    TTF_SetFontKerning(g_font, g_options.disable_kerning ? 0 : 1);
 
     // TTF_RenderUTF8_Blended() 渲染整行时，真实基线位置是 font ascent 加上内部 ystart。
     // 像素字体经过 hinting 后，某些 glyph 的 maxy 可能比 TTF_FontAscent() 多 1px；
