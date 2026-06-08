@@ -2,6 +2,7 @@
 #include <SDL_ttf.h>
 #include <algorithm>
 #include <charconv>
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -15,6 +16,13 @@ struct SingleGlyphData {
     int right_padding;        // 预留的右边空白像素数量
     int baseline_y;           // 基线相对于返回的 Surface 最上一行的像素数量
     int advance;              // glyph 排版推进宽度，空格等无像素字符也需要保留
+    int metrics_minx;         // TTF_GlyphMetrics32() 返回的 minx
+    int metrics_maxx;         // TTF_GlyphMetrics32() 返回的 maxx
+    int metrics_miny;         // TTF_GlyphMetrics32() 返回的 miny
+    int metrics_maxy;         // TTF_GlyphMetrics32() 返回的 maxy
+    int metrics_advance;      // TTF_GlyphMetrics32() 返回的 advance
+    int tex_orig_w;           // TTF_RenderGlyph32_Blended() 返回 surface 的原始宽度
+    int tex_orig_h;           // TTF_RenderGlyph32_Blended() 返回 surface 的原始高度
 };
 
 struct RenderedGlyphData {
@@ -237,9 +245,19 @@ bool SplitUTF8String(std::string_view text, std::vector<std::string_view>& chars
     return !chars.empty();
 }
 
+std::string DisplayChar(std::string_view utf8_char) {
+    if (utf8_char == " ") {
+        return "<space>";
+    }
+    if (utf8_char == "\t") {
+        return "<tab>";
+    }
+    return std::string(utf8_char);
+}
+
 // 获取单字排版数据与最小 Surface
 SingleGlyphData GetSingleGlyphMinBoundingBox(TTF_Font* font, std::string_view utf8_char, SDL_Color color) {
-    SingleGlyphData data = { nullptr, 0, 0, 0, 0 };
+    SingleGlyphData data = { nullptr, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     if (!font || utf8_char.empty()) return data;
 
     Uint32 ch = 0;
@@ -257,15 +275,23 @@ SingleGlyphData GetSingleGlyphMinBoundingBox(TTF_Font* font, std::string_view ut
     data.right_padding = advance - maxx;
     data.baseline_y = maxy;
     data.advance = advance;
+    data.metrics_minx = minx;
+    data.metrics_maxx = maxx;
+    data.metrics_miny = miny;
+    data.metrics_maxy = maxy;
+    data.metrics_advance = advance;
+
+    SDL_Surface* rendered = TTF_RenderGlyph32_Blended(font, ch, color);
+    if (!rendered) {
+        return data;
+    }
+    data.tex_orig_w = rendered->w;
+    data.tex_orig_h = rendered->h;
 
     const int glyph_w = maxx - minx;
     const int glyph_h = maxy - miny;
     if (glyph_w <= 0 || glyph_h <= 0) {
-        return data;
-    }
-
-    SDL_Surface* rendered = TTF_RenderGlyph32_Blended(font, ch, color);
-    if (!rendered) {
+        SDL_FreeSurface(rendered);
         return data;
     }
 
@@ -306,14 +332,13 @@ RenderedGlyphData RenderSingleGlyph(TTF_Font* font, std::string_view utf8_char, 
     }
 
     int minx, maxx, miny, maxy, advance;
+    bool has_visible_metrics = false;
     if (TTF_GlyphMetrics32(font, ch, &minx, &maxx, &miny, &maxy, &advance) == 0) {
         data.baseline_y = std::max(TTF_FontAscent(font), maxy);
         data.left_padding = minx;
         data.right_padding = advance - maxx;
         data.advance = advance;
-        if (maxx - minx <= 0 || maxy - miny <= 0) {
-            return data;
-        }
+        has_visible_metrics = (maxx - minx > 0) && (maxy - miny > 0);
     }
 
     if (render_as_utf8) {
@@ -326,6 +351,10 @@ RenderedGlyphData RenderSingleGlyph(TTF_Font* font, std::string_view utf8_char, 
     if (!data.surface) {
         std::cerr << (render_as_utf8 ? "TTF_RenderUTF8_Blended" : "TTF_RenderGlyph32_Blended")
                   << " failed: " << TTF_GetError() << "\n";
+    } else if (!has_visible_metrics) {
+        data.left_padding = 0;
+        data.right_padding = 0;
+        data.advance = data.surface->w;
     }
     return data;
 }
@@ -350,14 +379,18 @@ RenderedGlyphData RenderHorizontallyCroppedGlyph(TTF_Font* font, std::string_vie
     data.baseline_y = std::max(TTF_FontAscent(font), maxy);
     data.advance = advance;
 
-    const int glyph_w = maxx - minx;
-    if (glyph_w <= 0) {
-        return data;
-    }
-
     SDL_Surface* rendered = TTF_RenderGlyph32_Blended(font, ch, color);
     if (!rendered) {
         std::cerr << "TTF_RenderGlyph32_Blended failed: " << TTF_GetError() << "\n";
+        return data;
+    }
+
+    const int glyph_w = maxx - minx;
+    if (glyph_w <= 0) {
+        data.left_padding = 0;
+        data.right_padding = 0;
+        data.advance = rendered->w;
+        data.surface = rendered;
         return data;
     }
 
@@ -620,10 +653,24 @@ int main(int argc, char* argv[]) {
     g_glyph32_surfaces.reserve(g_chars_to_draw.size());
     g_utf8_char_surfaces.reserve(g_chars_to_draw.size());
 
-    std::cout << "char\ttexture_width_px\ttexture_height_px\tleft_padding_px\tright_padding_px\tbaseline_from_top_px\n";
+    std::cout << std::left
+              << std::setw(10) << "char"
+              << std::right
+              << std::setw(12) << "ttf_min_x"
+              << std::setw(12) << "ttf_max_x"
+              << std::setw(12) << "ttf_min_y"
+              << std::setw(12) << "ttf_max_y"
+              << std::setw(14) << "ttf_advance"
+              << std::setw(12) << "tex_orig_w"
+              << std::setw(12) << "tex_orig_h"
+              << std::setw(8) << "tex_w"
+              << std::setw(8) << "tex_h"
+              << std::setw(14) << "padding_left"
+              << std::setw(15) << "padding_right"
+              << std::setw(19) << "baseline_from_top"
+              << '\n';
     for (auto sv : g_chars_to_draw) {
         g_glyphs.push_back(GetSingleGlyphMinBoundingBox(g_font, sv, g_text_color));
-        std::cout.write(sv.data(), static_cast<std::streamsize>(sv.size()));
         const auto& glyph = g_glyphs.back();
         g_single_text_baseline_y = std::max(g_single_text_baseline_y, glyph.baseline_y);
 
@@ -631,11 +678,22 @@ int main(int argc, char* argv[]) {
         g_glyph32_surfaces.push_back(RenderSingleGlyph(g_font, sv, g_text_color, false));
         g_utf8_char_surfaces.push_back(RenderSingleGlyph(g_font, sv, g_text_color, true));
 
-        std::cout << '\t' << (glyph.min_surface ? glyph.min_surface->w : 0)
-                  << '\t' << (glyph.min_surface ? glyph.min_surface->h : 0)
-                  << '\t' << glyph.left_padding
-                  << '\t' << glyph.right_padding
-                  << '\t' << glyph.baseline_y << '\n';
+        std::cout << std::left
+                  << std::setw(10) << DisplayChar(sv)
+                  << std::right
+                  << std::setw(12) << glyph.metrics_minx
+                  << std::setw(12) << glyph.metrics_maxx
+                  << std::setw(12) << glyph.metrics_miny
+                  << std::setw(12) << glyph.metrics_maxy
+                  << std::setw(14) << glyph.metrics_advance
+                  << std::setw(12) << glyph.tex_orig_w
+                  << std::setw(12) << glyph.tex_orig_h
+                  << std::setw(8) << (glyph.min_surface ? glyph.min_surface->w : 0)
+                  << std::setw(8) << (glyph.min_surface ? glyph.min_surface->h : 0)
+                  << std::setw(14) << glyph.left_padding
+                  << std::setw(15) << glyph.right_padding
+                  << std::setw(19) << glyph.baseline_y
+                  << '\n';
     }
 
     bool quit = false;
