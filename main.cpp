@@ -44,6 +44,7 @@ struct ProgramOptions {
     bool font_style_bold = false;
     bool font_style_italic = false;
     bool disable_kerning = false;
+    std::string font_script;
 };
 
 ProgramOptions g_options;
@@ -72,7 +73,8 @@ void PrintUsage(std::ostream& os, const char* program) {
        << " [--draw-baseline]"
        << " [--font-style-bold]"
        << " [--font-style-italic]"
-       << " [--disable-kerning]\n";
+       << " [--disable-kerning]"
+       << " [--font-script <script>]\n";
 }
 
 bool IsOptionWithValue(std::string_view arg, std::string_view option) {
@@ -169,6 +171,17 @@ bool ParseOptions(int argc, char* argv[], ProgramOptions& options, bool& help_re
         }
         if (arg == "--disable-kerning") {
             options.disable_kerning = true;
+            continue;
+        }
+        if (IsOptionWithValue(arg, "--font-script")) {
+            if (!ReadOptionValue(argc, argv, i, "--font-script", value)) {
+                return false;
+            }
+            if (value.size() != 4) {
+                std::cerr << "--font-script must be exactly 4 characters, e.g. hani or latn\n";
+                return false;
+            }
+            options.font_script = std::string(value);
             continue;
         }
         std::cerr << "Unknown option: " << arg << '\n';
@@ -645,6 +658,25 @@ int main(int argc, char* argv[]) {
     }
     TTF_SetFontStyle(g_font, font_style);
     TTF_SetFontKerning(g_font, g_options.disable_kerning ? 0 : 1);
+    if (!g_options.font_script.empty()) {
+        SDL_ClearError();
+        if (TTF_SetFontScriptName(g_font, g_options.font_script.c_str()) != 0) {
+            const char* error = TTF_GetError();
+            std::cerr << "TTF_SetFontScriptName failed for --font-script=" << g_options.font_script;
+            if (error && *error) {
+                std::cerr << ". Error: " << error;
+            } else {
+                std::cerr << ". SDL_ttf may be built without HarfBuzz support";
+            }
+            std::cerr << "\n";
+            TTF_CloseFont(g_font);
+            SDL_DestroyRenderer(g_renderer);
+            SDL_DestroyWindow(window);
+            TTF_Quit();
+            SDL_Quit();
+            return -1;
+        }
+    }
 
     // TTF_RenderUTF8_Blended() 渲染整行时，真实基线位置是 font ascent 加上内部 ystart。
     // 像素字体经过 hinting 后，某些 glyph 的 maxy 可能比 TTF_FontAscent() 多 1px；
