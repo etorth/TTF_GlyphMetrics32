@@ -23,6 +23,7 @@ struct SingleGlyphData {
     int metrics_advance;      // TTF_GlyphMetrics32() 返回的 advance
     int tex_orig_w;           // TTF_RenderGlyph32_Blended() 返回 surface 的原始宽度
     int tex_orig_h;           // TTF_RenderGlyph32_Blended() 返回 surface 的原始高度
+    int glyph_is_provided32;   // TTF_GlyphIsProvided32() 的返回值
 };
 
 struct RenderedGlyphData {
@@ -257,7 +258,7 @@ std::string DisplayChar(std::string_view utf8_char) {
 
 // 获取单字排版数据与最小 Surface
 SingleGlyphData GetSingleGlyphMinBoundingBox(TTF_Font* font, std::string_view utf8_char, SDL_Color color) {
-    SingleGlyphData data = { nullptr, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    SingleGlyphData data = { nullptr, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     if (!font || utf8_char.empty()) return data;
 
     Uint32 ch = 0;
@@ -265,6 +266,7 @@ SingleGlyphData GetSingleGlyphMinBoundingBox(TTF_Font* font, std::string_view ut
         std::cerr << "输入不是刚好一个合法 UTF-8 字符\n";
         return data;
     }
+    data.glyph_is_provided32 = TTF_GlyphIsProvided32(font, ch);
 
     int minx, maxx, miny, maxy, advance;
     if (TTF_GlyphMetrics32(font, ch, &minx, &maxx, &miny, &maxy, &advance) != 0) {
@@ -668,6 +670,7 @@ int main(int argc, char* argv[]) {
               << std::setw(14) << "padding_left"
               << std::setw(15) << "padding_right"
               << std::setw(19) << "baseline_from_top"
+              << std::setw(24) << "ttf_glyph_is_provided32"
               << '\n';
     for (auto sv : g_chars_to_draw) {
         g_glyphs.push_back(GetSingleGlyphMinBoundingBox(g_font, sv, g_text_color));
@@ -693,6 +696,7 @@ int main(int argc, char* argv[]) {
                   << std::setw(14) << glyph.left_padding
                   << std::setw(15) << glyph.right_padding
                   << std::setw(19) << glyph.baseline_y
+                  << std::setw(24) << glyph.glyph_is_provided32
                   << '\n';
     }
 
